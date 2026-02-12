@@ -2,23 +2,25 @@
  * Confetti Animation Logic
  */
 export function fireConfetti() {
-    const duration = 3000;
+    const duration = 5000;
     const end = Date.now() + duration;
 
     (function frame() {
         // launch a few confetti from the left edge
         confetti({
-            particleCount: 5,
+            particleCount: 7,
             angle: 60,
             spread: 55,
-            origin: { x: 0 }
+            origin: { x: 0 },
+            zIndex: 2000
         });
         // and launch a few from the right edge
         confetti({
-            particleCount: 5,
+            particleCount: 7,
             angle: 120,
             spread: 55,
-            origin: { x: 1 }
+            origin: { x: 1 },
+            zIndex: 2000
         });
 
         if (Date.now() < end) {

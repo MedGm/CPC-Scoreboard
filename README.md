@@ -69,6 +69,12 @@ Enter a **Codeforces Contest ID** (e.g. `1950`) and click **Start Live Tracking*
 | **Reveal** | Dramatic one-by-one submission replay |
 | **Awards** | Podium + honorable mention badges |
 
+### Simulation Mode & Compact View
+
+**New in v1.1:**
+- **Simulate Contest**: Experience a full 4-hour contest in just 4 minutes (60x speed) with generated data. Perfect for testing your setup.
+- **Compact Dashboard**: During live contests and simulations, the UI switches to a full-screen mode with the timer in the top banner and an auto-scrolling scoreboard.
+
 ### Core Features
 
 - **Cinematic reveal** — submissions unlock one by one with pending/verdict animations

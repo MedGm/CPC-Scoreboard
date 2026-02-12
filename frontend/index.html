@@ -144,6 +144,89 @@
       pointer-events: none;
     }
 
+    .banner {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      height: 64px;
+      background: rgba(42, 8, 40, .85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(199, 125, 255, .1);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      /* New layout */
+      padding: 0 24px;
+      box-shadow: 0 4px 32px rgba(0, 0, 0, .2);
+    }
+
+    .banner-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .banner-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .banner-timer {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 20px;
+      font-weight: 700;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.08);
+      /* Subtle bg */
+      padding: 6px 14px;
+      border-radius: 8px;
+      letter-spacing: 1.5px;
+      box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      transition: color 0.3s, background 0.3s;
+    }
+
+    .banner-timer.timer--critical {
+      color: #ff4d4d;
+      background: rgba(255, 77, 77, 0.15);
+    }
+
+    .banner-timer.timer--frozen {
+      color: #60a5fa;
+      background: rgba(96, 165, 250, 0.15);
+    }
+
+    .banner-timer.timer--ended {
+      color: #f6a23a;
+    }
+
+    /* Fullscreen Mode Overrides */
+    body.fullscreen .header {
+      display: none;
+    }
+
+    body.fullscreen .stats {
+      display: none;
+    }
+
+    body.fullscreen .container {
+      padding-top: 20px;
+      max-width: 95%;
+      /* Wider board */
+    }
+
+    body.fullscreen .board-body {
+      max-height: calc(100vh - 120px);
+      /* Fill screen minus banner & header */
+    }
+
+    /* Hide old timer sections just in case */
+    body.fullscreen .contest-timer {
+      display: none !important;
+    }
+
     .setup-logo {
       position: relative;
       z-index: 1;
@@ -386,7 +469,6 @@
     .contest-timer {
       text-align: center;
       padding: 20px 24px 16px;
-      display: none;
     }
 
     .timer-display {
@@ -1760,6 +1842,17 @@
           Start Live Tracking
         </button>
 
+        <button class="btn btn--primary" onclick="startSimulation()"
+          style="background: linear-gradient(135deg, #7B2FA0, #C77DFF); border-color: #C77DFF;">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="6" width="20" height="12" rx="2" />
+            <circle cx="8" cy="12" r="2" fill="currentColor" />
+            <circle cx="16" cy="12" r="2" fill="currentColor" />
+          </svg>
+          🎮 Simulate Contest
+        </button>
+
         <div class="setup-divider">or load offline</div>
 
         <button class="btn btn--ghost" onclick="loadDemoMode()">
@@ -1788,12 +1881,19 @@
      BANNER
      ════════════════════════════════════════════════════════════════════ -->
   <div class="banner" id="banner" style="display:none">
-    <span class="live-dot" id="live-dot" style="display:none"></span>
-    <svg class="banner-icon" id="banner-icon" viewBox="0 0 24 24" fill="currentColor">
-      <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
-      <path d="M12 6v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-    </svg>
-    <span id="banner-text">SCOREBOARD FROZEN</span>
+    <div class="banner-left">
+      <span class="live-dot" id="live-dot" style="display:none"></span>
+      <svg class="banner-icon" id="banner-icon" viewBox="0 0 24 24" fill="currentColor">
+        <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M12 6v6l4 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      </svg>
+      <span id="banner-text">SCOREBOARD FROZEN</span>
+    </div>
+    <div class="banner-right">
+      <div class="banner-timer" id="banner-timer" style="display:none">
+        <span id="timer-display">00:00:00</span>
+      </div>
+    </div>
   </div>
 
   <!-- Toast -->
@@ -1822,13 +1922,7 @@
     </div>
 
     <!-- Contest Timer -->
-    <div class="contest-timer" id="contest-timer" style="display:none">
-      <div class="timer-display" id="timer-display">03:59:59</div>
-      <div class="timer-label" id="timer-label">Time Remaining</div>
-      <div class="timer-progress">
-        <div class="timer-bar" id="timer-bar"></div>
-      </div>
-    </div>
+    <!-- Contest Timer moved to Banner -->
 
     <!-- Stats -->
     <div class="stats">

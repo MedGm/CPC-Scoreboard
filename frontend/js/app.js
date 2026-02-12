@@ -10,6 +10,12 @@ const VERDICT_MS = 1200;
 const CLIMB_STEP_MS = 180;
 const WA_PENALTY_MINUTES = 20;
 
+function fmtTime(sec) {
+    const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+    const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+    return h + ':' + m;
+}
+
 let currentPhase = 'setup';
 let data = null;
 let problems = [];
@@ -34,6 +40,7 @@ let contestDurationSec = 0;   // Total contest duration in seconds
 let freezeAtSec = 0;          // Seconds from start when freeze happens
 let contestStartTimestamp = 0;  // When contest started (Date.now() - elapsed)
 let timerInterval = null;
+let timeScale = 1; // For simulation: 60 means 60x speed
 let isFrozen = false;
 
 const el = id => document.getElementById(id);
@@ -92,13 +99,14 @@ function formatTime(seconds) {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function startContestTimer(durationSec, freezeAtSecond, elapsedSec = 0) {
+function startContestTimer(durationSec, freezeAtSecond, elapsedSec = 0, scale = 1) {
     contestDurationSec = durationSec;
     freezeAtSec = freezeAtSecond;
-    contestStartTimestamp = Date.now() - (elapsedSec * 1000);
+    contestStartTimestamp = Date.now() - (elapsedSec * 1000 / scale);
     isFrozen = false;
+    timeScale = scale;
 
-    el('contest-timer').style.display = '';
+    el('banner-timer').style.display = 'block';
     updateTimerDisplay();
 
     if (timerInterval) clearInterval(timerInterval);
@@ -113,7 +121,7 @@ function stopContestTimer() {
 }
 
 function updateTimerDisplay() {
-    const elapsedMs = Date.now() - contestStartTimestamp;
+    const elapsedMs = (Date.now() - contestStartTimestamp) * timeScale;
     const elapsedSec = Math.floor(elapsedMs / 1000);
     const remaining = Math.max(0, contestDurationSec - elapsedSec);
     const remainingUntilFreeze = Math.max(0, freezeAtSec - elapsedSec);
@@ -121,41 +129,18 @@ function updateTimerDisplay() {
     // Update clock
     el('timer-display').textContent = formatTime(remaining);
 
-    // Update progress bar
-    const pct = Math.max(0, (remaining / contestDurationSec) * 100);
-    el('timer-bar').style.width = pct + '%';
-
-    // Update label
-    if (remaining <= 0) {
-        el('timer-label').textContent = 'Contest Ended';
-    } else if (isFrozen) {
-        el('timer-label').textContent = 'Frozen — ' + formatTime(remaining) + ' remaining';
-    } else if (remainingUntilFreeze <= 300 && remainingUntilFreeze > 0) {
-        el('timer-label').textContent = 'Freeze in ' + formatTime(remainingUntilFreeze);
-    } else {
-        el('timer-label').textContent = 'Time Remaining';
-    }
-
     // Color transitions
-    const timerEl = el('timer-display');
-    const barEl = el('timer-bar');
-    timerEl.className = 'timer-display';
-    barEl.className = 'timer-bar';
+    const timerEl = el('banner-timer');
+    timerEl.className = 'banner-timer';
 
     if (remaining <= 0) {
         timerEl.classList.add('timer--ended');
-        barEl.classList.add('bar--critical');
-    } else if (isFrozen && remaining <= 120) {
-        timerEl.classList.add('timer--critical');
-        barEl.classList.add('bar--critical');
-    } else if (isFrozen && remaining <= 600) {
-        timerEl.classList.add('timer--urgent');
-        barEl.classList.add('bar--urgent');
     } else if (isFrozen) {
         timerEl.classList.add('timer--frozen');
-        barEl.classList.add('bar--frozen');
+    } else if (remainingUntilFreeze <= 300 && remainingUntilFreeze > 0) {
+        timerEl.classList.add('timer--critical');
     }
-    // else: default green from CSS
+    // else default
 
     // Auto-freeze transition
     if (!isFrozen && elapsedSec >= freezeAtSec && currentPhase === 'live') {
@@ -173,6 +158,40 @@ function updateTimerDisplay() {
 // ═══════════════════════════════════════════════════════════════════════
 //  SETUP & PHASE TRANSITIONS
 // ═══════════════════════════════════════════════════════════════════════
+
+async function startSimulation() {
+    showLoading('Generating simulation data…');
+    hideSetupError();
+
+    try {
+        const res = await fetch('/api/simulate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ seed: Math.floor(Math.random() * 10000) }),
+        });
+        const result = await res.json();
+        if (result.error) throw new Error(result.error);
+
+        const standingsData = await API.getStandings();
+        if (standingsData.data) {
+            contestName = result.contestName || 'Simulation';
+
+            const totalDuration = standingsData.data.contest.durationSeconds || 14400;
+            const freezeMin = 60; // last hour is blind
+            const freezeAtSecond = totalDuration - (freezeMin * 60);
+            const elapsed = standingsData.data.contest.relativeTimeSeconds || 0;
+
+            // In simulation mode, use compression ratio: 4h -> 4min = 60:1
+            const simScale = totalDuration / 240;  // 14400 / 240 = 60
+            enterLivePhase(standingsData.data, 1, totalDuration, freezeAtSecond, elapsed, simScale);
+        } else {
+            throw new Error('No standings data received');
+        }
+    } catch (err) {
+        hideLoading();
+        showSetupError(err.message);
+    }
+}
 
 async function startLive() {
     const contestId = el('setup-contest-id').value.trim();
@@ -258,7 +277,7 @@ function loadFileMode() {
     input.click();
 }
 
-function enterLivePhase(standingsData, pollInterval, durationSec, freezeAtSecond, elapsedSec) {
+function enterLivePhase(standingsData, pollInterval, durationSec, freezeAtSecond, elapsedSec, scale = 1) {
     currentPhase = 'live';
     el('setup-screen').style.display = 'none';
     hideLoading();
@@ -273,6 +292,8 @@ function enterLivePhase(standingsData, pollInterval, durationSec, freezeAtSecond
     el('contest-subtitle').textContent = 'Live Scoreboard';
 
     el('app').style.display = 'block';
+    document.body.classList.add('fullscreen');
+    startAutoScroll();
 
     el('controls-live').style.display = 'flex';
     el('controls-frozen').style.display = 'none';
@@ -289,7 +310,7 @@ function enterLivePhase(standingsData, pollInterval, durationSec, freezeAtSecond
 
     // Start timer
     if (durationSec && durationSec > 0) {
-        startContestTimer(durationSec, freezeAtSecond, elapsedSec);
+        startContestTimer(durationSec, freezeAtSecond, elapsedSec, scale);
 
         // Check if we should already be frozen or ended
         if (elapsedSec >= durationSec) {
@@ -314,14 +335,17 @@ function enterFrozenPhase() {
     currentPhase = 'frozen';
     isFrozen = true;
 
-    // Stop live polling
-    if (livePoller) { clearInterval(livePoller); livePoller = null; }
+    // Stop live polling only if not in sim mode (sim needs to keep polling to detect contest end)
+    if (livePoller && timeScale <= 1) { clearInterval(livePoller); livePoller = null; }
 
     el('banner').className = 'banner banner--freeze';
     el('live-dot').style.display = 'none';
     el('banner-icon').style.display = '';
     el('banner-text').textContent = 'SCOREBOARD FROZEN — BLIND HOUR IN PROGRESS';
     el('contest-subtitle').textContent = 'Scoreboard Frozen';
+
+    // Ensure auto-scroll continues in frozen phase
+    startAutoScroll();
 
     el('controls-live').style.display = 'none';
     el('controls-frozen').style.display = 'flex';
@@ -344,9 +368,7 @@ function enterContestEndedPhase() {
 
     // Show ended time
     el('timer-display').textContent = '00:00:00';
-    el('timer-display').className = 'timer-display timer--ended';
-    el('timer-label').textContent = 'Contest Ended';
-    el('timer-bar').style.width = '0%';
+    el('banner-timer').className = 'banner-timer timer--ended';
 
     el('controls-live').style.display = 'none';
     el('controls-frozen').style.display = 'none';
@@ -363,9 +385,13 @@ function enterRevealPhase(revealData) {
     el('setup-screen').style.display = 'none';
     hideLoading();
     stopContestTimer();
+    stopAutoScroll();
+    document.body.classList.remove('fullscreen'); // Reveal phase uses standard layout or focused layout? 
+    // User wants "keep doing that until the end of the contest". Reveal is post-contest.
+    // Let's keep fullscreen off for reveal as it's interactive.
 
     // Hide timer during reveal
-    el('contest-timer').style.display = 'none';
+    el('banner-timer').style.display = 'none';
 
     el('banner').style.display = '';
     el('banner').className = 'banner banner--freeze';
@@ -398,10 +424,28 @@ function enterRevealPhase(revealData) {
 async function pollLiveStandings() {
     try {
         const result = await API.getStandings();
-        if (result.phase === 'frozen') {
+
+        // Handle ENDED phase transition
+        if (result.phase === 'ended' || result.phase === 'finished') {
             if (livePoller) clearInterval(livePoller);
             livePoller = null;
-            enterFrozenPhase();
+            enterContestEndedPhase();
+            return;
+        }
+
+        if (result.phase === 'frozen') {
+            // In sim mode, keep polling to detect contest end
+            if (timeScale <= 1) {
+                if (livePoller) clearInterval(livePoller);
+                livePoller = null;
+            }
+            if (currentPhase !== 'frozen') {
+                enterFrozenPhase();
+            }
+            // Update standings even while frozen (for accepted count etc)
+            if (result.data) {
+                renderLiveStandings(result.data);
+            }
             return;
         }
         if (result.phase === 'live' && result.data) {
@@ -511,7 +555,7 @@ function liveRowHTML(c, displayRank) {
         let cls = 'prob--empty', label = '\u00B7';
         if (pr?.solved) {
             cls = 'prob--solved';
-            label = Math.floor(pr.time / 60) + "'";
+            label = fmtTime(pr.time);
         } else if (pr?.rejectedAttempts > 0) {
             cls = 'prob--failed';
             label = '-' + pr.rejectedAttempts;
@@ -616,7 +660,7 @@ function rowHTML(c, pendingProb) {
         if (pendingProb === p.index) {
             cls = 'prob--judging'; label = '...';
         } else if (c.probs[p.index]?.solved) {
-            cls = 'prob--solved'; label = Math.floor(c.probs[p.index].time / 60) + "'";
+            cls = 'prob--solved'; label = fmtTime(c.probs[p.index].time);
         } else if (c.probs[p.index]?.failed) {
             cls = 'prob--failed'; label = '-';
         }
@@ -802,50 +846,60 @@ async function revealAll() {
     stopAuto();
     if (!confirm('Are you sure you want to skip all animations and show final results?')) return;
 
-    // Snapshot old ranks for MVP tracking
-    const oldRanks = {};
-    state.forEach(c => { oldRanks[c.handle] = c.rank; });
+    try {
+        // Snapshot old ranks for MVP tracking
+        const oldRanks = {};
+        state.forEach(c => { oldRanks[c.handle] = c.rank; });
 
-    while (queue.length > 0) {
-        const sub = queue.shift();
-        revealed++;
-        const c = state.find(x => x.handle === sub.handle);
-        if (!c) continue;
+        let processed = 0;
+        while (queue.length > 0) {
+            const sub = queue.shift();
+            processed++;
+            revealed++;
+            const c = state.find(x => x.handle === sub.handle);
+            if (!c) {
+                console.warn('Contestant not found for handle:', sub.handle);
+                continue;
+            }
 
-        // Track submission counts for "Mr. Not Give Up"
-        const key = sub.handle + '|' + sub.problemIndex;
-        submissionCounts[key] = (submissionCounts[key] || 0) + 1;
-        if (submissionCounts[key] > mostPersistent.count) {
-            mostPersistent = { handle: sub.handle, problemIndex: sub.problemIndex, problemName: sub.problemName, count: submissionCounts[key] };
-        }
+            // Track submission counts for "Mr. Not Give Up"
+            const key = sub.handle + '|' + sub.problemIndex;
+            submissionCounts[key] = (submissionCounts[key] || 0) + 1;
+            if (submissionCounts[key] > mostPersistent.count) {
+                mostPersistent = { handle: sub.handle, problemIndex: sub.problemIndex, problemName: sub.problemName, count: submissionCounts[key] };
+            }
 
-        if (sub.verdict === 'OK') {
-            c.probs[sub.problemIndex] = { solved: true, time: sub.relativeTimeSec };
-            c.solved++;
-            const wa = sub.wrongAttemptsBefore || 0;
-            c.penalty += Math.floor(sub.relativeTimeSec / 60) + WA_PENALTY_MINUTES * wa;
-            acceptedCount++;
+            if (sub.verdict === 'OK') {
+                c.probs[sub.problemIndex] = { solved: true, time: sub.relativeTimeSec };
+                c.solved++;
+                const wa = sub.wrongAttemptsBefore || 0;
+                c.penalty += Math.floor(sub.relativeTimeSec / 60) + WA_PENALTY_MINUTES * wa;
+                acceptedCount++;
 
-            // Track "Last-Minute Hero"
-            if (sub.relativeTimeSec > lastMinuteHero.time) {
-                lastMinuteHero = { handle: sub.handle, problemIndex: sub.problemIndex, problemName: sub.problemName, time: sub.relativeTimeSec };
+                // Track "Last-Minute Hero"
+                if (sub.relativeTimeSec > lastMinuteHero.time) {
+                    lastMinuteHero = { handle: sub.handle, problemIndex: sub.problemIndex, problemName: sub.problemName, time: sub.relativeTimeSec };
+                }
             }
         }
+
+        recalcRanks();
+
+        // Calculate MVP / Hill Climber and count rank changes
+        state.forEach(c => {
+            const delta = (oldRanks[c.handle] || c.rank) - c.rank;
+            if (delta !== 0) rankChangeCount++;
+            if (delta > mvp.delta) {
+                mvp = { handle: c.handle, delta };
+            }
+        });
+
+        buildRows();
+        finishReveal();
+    } catch (e) {
+        console.error('revealAll error:', e);
+        alert('Error revealing all: ' + e.message);
     }
-
-    recalcRanks();
-
-    // Calculate MVP / Hill Climber and count rank changes
-    state.forEach(c => {
-        const delta = (oldRanks[c.handle] || c.rank) - c.rank;
-        if (delta !== 0) rankChangeCount++;
-        if (delta > mvp.delta) {
-            mvp = { handle: c.handle, delta };
-        }
-    });
-
-    buildRows();
-    finishReveal();
 }
 
 function finishReveal() {
@@ -936,7 +990,7 @@ function showAwards() {
 
     // Last-Minute Hero — last person to solve a problem
     if (lastMinuteHero.handle) {
-        const mins = Math.floor(lastMinuteHero.time / 60);
+        const timeStr = fmtTime(lastMinuteHero.time);
         badgesHtml += `
         <div class="award-card award-card--hero">
             <div class="award-card-icon">
@@ -948,7 +1002,7 @@ function showAwards() {
             <div class="award-card-text">
                 <div class="award-card-label">Last-Minute Hero</div>
                 <div class="award-card-name">${lastMinuteHero.handle}</div>
-                <div class="award-card-detail">Solved ${lastMinuteHero.problemIndex} at ${mins}'</div>
+                <div class="award-card-detail">Solved ${lastMinuteHero.problemIndex} at ${timeStr}</div>
             </div>
         </div>`;
     }
@@ -963,6 +1017,43 @@ function closeAwards() {
 // ═══════════════════════════════════════════════════════════════════════
 //  UI HELPERS
 // ═══════════════════════════════════════════════════════════════════════
+
+let scrollInterval = null;
+let scrollPausing = false;
+
+function startAutoScroll() {
+    if (scrollInterval) return;
+    const body = el('board-body');
+    const speed = 1; // px per tick
+    const tick = 30; // ms
+
+    scrollInterval = setInterval(() => {
+        if (scrollPausing) return;
+
+        // If content fits, no scroll needed
+        if (body.scrollHeight <= body.clientHeight) return;
+
+        body.scrollTop += speed;
+
+        // Check if reached bottom with buffer
+        if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) {
+            scrollPausing = true;
+            setTimeout(() => {
+                // Jump to top
+                body.scrollTo({ top: 0, behavior: 'smooth' });
+                // pause at top
+                setTimeout(() => { scrollPausing = false; }, 4000);
+            }, 2000);
+        }
+    }, tick);
+}
+
+function stopAutoScroll() {
+    if (scrollInterval) {
+        clearInterval(scrollInterval);
+        scrollInterval = null;
+    }
+}
 
 function showLoading(msg) {
     el('loading-text').innerText = msg;
@@ -992,6 +1083,7 @@ function toast(msg, type = 'accepted') {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Attach global functions for HTML event handlers
+window.startSimulation = startSimulation;
 window.startLive = startLive;
 window.loadDemoMode = loadDemoMode;
 window.loadFileMode = loadFileMode;

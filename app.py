@@ -23,6 +23,7 @@ from flask import Flask, jsonify, request, send_from_directory, abort
 
 # Import core logic from backend package
 from backend import core
+from backend.generate_sample import generate_sample_data
 
 # ═══════════════════════════════════════════════════════════════════════
 #  PHASE STATE MACHINE
@@ -64,6 +65,14 @@ class ContestState:
         self._poller_thread: threading.Thread | None = None
         self._poller_stop = threading.Event()
         self._lock = threading.Lock()
+
+        # ── Simulation state ──────────────────────────────────────────
+        self.sim_mode: bool = False
+        self.sim_data: dict | None = None        # full generated data
+        self.sim_start_real: float = 0            # real-time when sim started
+        self.sim_compression: float = 60.0        # ratio: 60 sim-sec per 1 real-sec
+        self.sim_all_subs: list[dict] = []        # all submissions sorted by time
+        self.sim_freeze_sec: int = 0              # freeze time in sim seconds
 
     def start_contest(self, contest_id: int, freeze_minutes: int, poll_interval: int = 30):
         """Initialize tracking for a contest → enter LIVE phase."""
@@ -197,7 +206,195 @@ class ContestState:
         self.poll_error = None
         self.cached_rows = []
         self.cached_submissions = []
+        self.sim_mode = False
+        self.sim_data = None
+        self.sim_all_subs = []
         print("⏹ RESET — back to setup")
+
+    # ── Simulation ────────────────────────────────────────────────────
+
+    def start_simulation(self, seed: int = 42):
+        """Start a simulated contest: 40 contestants, 4h, last 1h blind."""
+        self.reset()
+        self.sim_mode = True
+
+        # Generate data
+        data = generate_sample_data(seed=seed, n_contestants=40,
+                                    duration_min=240, freeze_min=180, n_problems=7)
+        self.sim_data = data
+        self.contest_id = 0
+        self.contest_name = data["contest"]["name"]
+        self.duration_seconds = data["contest"]["durationSeconds"]
+        self.freeze_minutes = 180
+        self.sim_freeze_sec = data["contest"]["freezeTimeSeconds"]
+        self.problems = data["problems"]
+        self.sim_all_subs = data.get("allSubmissions", [])
+
+        # Compression: 4h (14400s) -> 4min (240s real)
+        self.sim_compression = self.duration_seconds / 240.0
+        self.sim_start_real = _time.time()
+
+        # Build initial standings (empty — no solves yet)
+        self._sim_update_standings(0)
+
+        self.phase = "live"
+        print(f"🎮 SIMULATION — {len(data['contestants'])} contestants, "
+              f"{len(data['problems'])} problems, {self.duration_seconds}s contest")
+        print(f"   Compression: {self.sim_compression:.0f}:1 → "
+              f"{self.duration_seconds / self.sim_compression:.0f}s real time")
+
+        # Start simulation ticker (updates standings every 1s real time)
+        self._poller_stop.clear()
+        self._poller_thread = threading.Thread(target=self._sim_loop, daemon=True)
+        self._poller_thread.start()
+
+    def _sim_elapsed(self) -> int:
+        """Return simulated elapsed seconds based on real clock."""
+        real_elapsed = _time.time() - self.sim_start_real
+        return int(real_elapsed * self.sim_compression)
+
+    def _sim_update_standings(self, sim_time: int):
+        """Rebuild standings based on submissions up to sim_time."""
+        contestants_data = self.sim_data["contestants"]
+        problems = self.sim_data["problems"]
+        freeze_sec = self.sim_freeze_sec
+
+        # Build per-handle state
+        results = {}  # handle -> {prob_idx -> {solved, time, rejectedAttempts}}
+        for c in contestants_data:
+            results[c["handle"]] = {}
+            for p in problems:
+                results[c["handle"]][p["index"]] = {
+                    "solved": False, "time": 0, "rejectedAttempts": 0
+                }
+
+        # Replay submissions up to sim_time
+        for sub in self.sim_all_subs:
+            if sub["relativeTimeSec"] > sim_time:
+                break
+            h = sub["handle"]
+            pi = sub["problemIndex"]
+            if h not in results:
+                continue
+            pr = results[h][pi]
+            if pr["solved"]:
+                continue  # already solved
+            if sub["verdict"] == "OK":
+                pr["solved"] = True
+                pr["time"] = sub["relativeTimeSec"]
+            else:
+                pr["rejectedAttempts"] += 1
+
+        # If past freeze time, hide blind hour results (show freeze-state only)
+        if sim_time >= freeze_sec:
+            visible_time = freeze_sec
+        else:
+            visible_time = sim_time
+
+        # Build visible results (only show solves up to visible_time)
+        visible_results = {}
+        for c in contestants_data:
+            visible_results[c["handle"]] = {}
+            for p in problems:
+                full = results[c["handle"]][p["index"]]
+                if full["solved"] and full["time"] <= visible_time:
+                    visible_results[c["handle"]][p["index"]] = dict(full)
+                else:
+                    # Count WAs only up to visible time
+                    wa = 0
+                    for sub in self.sim_all_subs:
+                        if sub["relativeTimeSec"] > visible_time:
+                            break
+                        if sub["handle"] == c["handle"] and sub["problemIndex"] == p["index"] and sub["verdict"] != "OK":
+                            wa += 1
+                    visible_results[c["handle"]][p["index"]] = {
+                        "solved": False, "time": 0, "rejectedAttempts": wa
+                    }
+
+        # Build contestant list with rank
+        contestants = []
+        for c in contestants_data:
+            vr = visible_results[c["handle"]]
+            solved = sum(1 for pr in vr.values() if pr["solved"])
+            penalty = sum(
+                pr["time"] // 60 + 20 * pr["rejectedAttempts"]
+                for pr in vr.values() if pr["solved"]
+            )
+            contestants.append({
+                "handle": c["handle"],
+                "rank": 0,
+                "solved": solved,
+                "penalty": penalty,
+                "problemResults": vr,
+            })
+
+        # Sort and assign ranks
+        contestants.sort(key=lambda x: (-x["solved"], x["penalty"]))
+        for i, c in enumerate(contestants):
+            c["rank"] = i + 1
+
+        # Determine phase string
+        remaining = self.duration_seconds - sim_time
+        if sim_time >= self.duration_seconds:
+            cf_phase = "FINISHED"
+        elif sim_time >= freeze_sec:
+            cf_phase = "FROZEN"
+        else:
+            cf_phase = "CODING"
+
+        with self._lock:
+            self.live_standings = {
+                "contest": {
+                    "id": 0,
+                    "name": self.contest_name,
+                    "durationSeconds": self.duration_seconds,
+                    "phase": cf_phase,
+                    "relativeTimeSeconds": sim_time,
+                },
+                "problems": [{"index": p["index"], "name": p["name"]} for p in problems],
+                "contestants": contestants,
+            }
+            self.last_poll_time = _time.time()
+
+    def _sim_loop(self):
+        """Background thread: tick simulation clock and update standings."""
+        while not self._poller_stop.is_set():
+            sim_time = self._sim_elapsed()
+
+            # Auto-freeze at blind hour start
+            if sim_time >= self.sim_freeze_sec and self.phase == "live":
+                print(f"❄️  Auto-freeze at sim time {sim_time}s "
+                      f"(freeze={self.sim_freeze_sec}s)")
+                self.phase = "frozen"
+
+            # Contest ended
+            if sim_time >= self.duration_seconds:
+                self._sim_update_standings(self.duration_seconds)
+                # Ensure we mark it as ended so pollers see it
+                self.phase = "ended"
+                print("🏁 Simulation contest ended — ready for reveal")
+                break
+
+            self._sim_update_standings(sim_time)
+            self._poller_stop.wait(1.0)  # tick every 1s real time
+
+    def start_reveal_sim(self):
+        """Transition to REVEAL phase using simulation data."""
+        self._stop_poller()
+        self.phase = "reveal"
+        self.poll_error = None
+        print("🎬 REVEAL — using simulation reveal data…")
+
+        # Build reveal data from sim_data (same format as core.build_reveal_data)
+        self.reveal_data = {
+            "contest": self.sim_data["contest"],
+            "problems": self.sim_data["problems"],
+            "contestants": self.sim_data["contestants"],
+            "blindHourSubmissions": self.sim_data["blindHourSubmissions"],
+        }
+        n = len(self.reveal_data["contestants"])
+        b = len(self.reveal_data["blindHourSubmissions"])
+        print(f"  ✓ Reveal data ready: {n} contestants, {b} blind-hour subs")
 
     def get_live_data(self) -> dict:
         """Thread-safe read of live standings."""
@@ -279,6 +476,7 @@ def get_phase():
         "durationSeconds": contest_state.duration_seconds,
         "lastPollTime": contest_state.last_poll_time,
         "error": contest_state.poll_error,
+        "simMode": contest_state.sim_mode,
     })
 
 
@@ -327,7 +525,11 @@ def freeze_contest():
 
 @app.route("/api/reveal", methods=["POST"])
 def reveal_contest():
-    """Start the reveal phase — builds reveal data from CF API."""
+    """Start the reveal phase — builds reveal data from CF API or sim data."""
+    if contest_state.sim_mode:
+        contest_state.start_reveal_sim()
+        return jsonify({"status": "ok", "phase": contest_state.phase})
+
     def do_reveal():
         contest_state.start_reveal()
 
@@ -339,6 +541,22 @@ def reveal_contest():
         return jsonify({"error": contest_state.poll_error}), 500
 
     return jsonify({"status": "ok", "phase": contest_state.phase})
+
+
+@app.route("/api/simulate", methods=["POST"])
+def simulate_contest():
+    """Start a simulated 4h contest with 40 contestants."""
+    body = request.get_json(force=True) if request.data else {}
+    seed = int(body.get("seed", 42))
+
+    contest_state.start_simulation(seed=seed)
+
+    return jsonify({
+        "status": "ok",
+        "phase": contest_state.phase,
+        "contestName": contest_state.contest_name,
+        "simMode": True,
+    })
 
 
 @app.route("/api/reset", methods=["POST"])
