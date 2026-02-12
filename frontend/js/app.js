@@ -530,6 +530,7 @@ function renderLiveStandings(standingsData) {
     });
 
     const body = el('board-body');
+    const oldScroll = body.scrollTop;
     body.innerHTML = '';
     body.style.height = (contestants.length * ROW_H) + 'px';
     document.documentElement.style.setProperty('--row-h', ROW_H + 'px');
@@ -541,6 +542,7 @@ function renderLiveStandings(standingsData) {
         div.innerHTML = liveRowHTML(c, idx + 1);
         body.appendChild(div);
     });
+    body.scrollTop = oldScroll;
 }
 
 function liveRowHTML(c, displayRank) {
